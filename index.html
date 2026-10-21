@@ -422,7 +422,10 @@ async function buildGroupPdf(g) {
   var tally = {}, kinds = 0;
   g.orders.forEach(function (o) { o.items.forEach(function (it) {
     var k = it.sku || '(khong doc duoc)'; if (!tally[k]) { tally[k] = { q: 0, n: 0 }; kinds++; } tally[k].q += it.qty; tally[k].n++; }); });
-  var keys = Object.keys(tally).sort();
+  var cat = state.catalog || {};
+  function khoOf(k) { return cat[k] ? cat[k].kho : '?'; }
+  var keys = Object.keys(tally).sort(function (a, b) { return khoOf(a).localeCompare(khoOf(b)) || a.localeCompare(b); });
+  var hasUnknown = keys.some(function (k) { return khoOf(k) === '?'; });
   var W = 298, H = 420, lines = [];
   keys.forEach(function (k) { lines.push(k); });
   var perPage = 30, pageCount = Math.max(1, Math.ceil(lines.length / perPage));
@@ -433,14 +436,19 @@ async function buildGroupPdf(g) {
     pg.drawText('PHIEU NHAT HANG  ' + g.orders.length + ' don  ' + totalQty + ' sp  ' + kinds + ' SKU' + (pageCount > 1 ? '  (' + (p + 1) + '/' + pageCount + ')' : ''), { x: 14, y: y, size: 8.5, font: font }); y -= 8;
     pg.drawLine({ start: { x: 14, y: y }, end: { x: W - 14, y: y }, thickness: 0.6 }); y -= 13;
     pg.drawText('SKU', { x: 14, y: y, size: 8, font: bold });
+    pg.drawText('Kho', { x: W - 108, y: y, size: 8, font: bold });
     pg.drawText('SL', { x: W - 70, y: y, size: 8, font: bold });
     pg.drawText('So don', { x: W - 44, y: y, size: 8, font: bold }); y -= 12;
     lines.slice(p * perPage, (p + 1) * perPage).forEach(function (k) {
-      pg.drawText(ascii(k).slice(0, 38), { x: 14, y: y, size: 9, font: font });
+      pg.drawText(ascii(k).slice(0, 30), { x: 14, y: y, size: 9, font: font });
+      pg.drawText(khoOf(k), { x: W - 104, y: y, size: 9, font: bold });
       pg.drawText(String(tally[k].q), { x: W - 70, y: y, size: 9, font: bold });
       pg.drawText(String(tally[k].n), { x: W - 40, y: y, size: 9, font: font });
       y -= 11.5;
     });
+    if (hasUnknown && p === pageCount - 1) {
+      pg.drawText('Kho "?" = SKU chua co trong danh muc SKUxKHO', { x: 14, y: Math.min(y - 6, 24), size: 7.5, font: font });
+    }
   }
   // labels
   for (var i = 0; i < g.orders.length; i++) {
