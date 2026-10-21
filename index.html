@@ -58,6 +58,11 @@ details summary{cursor:pointer;color:var(--mute)}
     <input type="file" id="files" multiple accept=".pdf,.xlsx" hidden></div>
   <div id="fileList" class="msg"></div>
   <div class="row" style="margin-top:10px">
+    <span class="small">Cách chia file:</span>
+    <label><input type="radio" name="mode" value="split" checked> Tách theo sàn (Shopee / TikTok riêng)</label>
+    <label><input type="radio" name="mode" value="mix"> Gộp các sàn</label>
+  </div>
+  <div class="row" style="margin-top:10px">
     <button class="pri" id="btnRun" disabled>Chia nhóm</button>
     <button id="btnClear">Xoá file</button>
   </div>
@@ -70,6 +75,7 @@ details summary{cursor:pointer;color:var(--mute)}
     <button class="pri" id="btnZip">Tải tất cả (.zip)</button>
     <button id="btnCsv">Tải bảng đối chiếu (.csv)</button>
   </div>
+  <div id="checkBox" class="msg" style="margin:0 0 10px"></div>
   <table id="grpTable"></table>
   <h2 style="margin-top:18px">Số đơn theo file / shop</h2>
   <table id="srcTable"></table>
@@ -125,12 +131,13 @@ function loadCatalogText(text) {
   var h = rows[0].map(function (x) { return ascii(x).toLowerCase().replace(/[^a-z]/g, ''); });
   var iS = h.indexOf('sku'), iK = h.indexOf('kho'), iN = h.indexOf('nhom'), iT = h.indexOf('tensp');
   if (iS < 0 || iK < 0 || iN < 0) throw new Error('Thiếu cột SKU / Kho / Nhom ở dòng 1');
-  var map = {}, dup = [], bad = [];
+  var map = {}, dup = [], bad = [], noNhom = 0;
   rows.slice(1).forEach(function (r, k) {
     var sku = normSku(r[iS]); if (!sku) return;
     var kho = String(r[iK] || '').replace(/[^0-9]/g, '');
     var nhom = String(r[iN] || '').trim();
-    if ((kho !== '1' && kho !== '2') || !nhom) { bad.push(sku); return; }
+    if (kho !== '1' && kho !== '2') { bad.push(sku); return; }
+    if (!nhom) { nhom = 'Chưa có nhóm'; noNhom++; }
     if (map[sku]) dup.push(sku);
     map[sku] = { kho: kho, nhom: nhom, ten: iT >= 0 ? r[iT] : '' };
   });
@@ -138,7 +145,8 @@ function loadCatalogText(text) {
   var n = Object.keys(map).length;
   var m = 'Đã tải <b>' + n + '</b> SKU.';
   if (dup.length) m += ' <span class="warn">Trùng: ' + esc(dup.slice(0, 10).join(', ')) + '</span>';
-  if (bad.length) m += ' <span class="warn">Thiếu kho/nhóm (bỏ qua): ' + esc(bad.slice(0, 10).join(', ')) + (bad.length > 10 ? '…' : '') + '</span>';
+  if (noNhom) m += ' <span class="warn">' + noNhom + ' SKU chưa điền Nhom (tạm xếp vào "Chưa có nhóm").</span>';
+  if (bad.length) m += ' <span class="warn">' + bad.length + ' SKU thiếu Kho 1/2 (bỏ qua): ' + esc(bad.slice(0, 10).join(', ')) + (bad.length > 10 ? '…' : '') + '</span>';
   $('catMsg').innerHTML = m;
   refreshRun();
 }
@@ -333,16 +341,26 @@ async function run() {
         pdfs.push({ file: f.name, buf: buf, pages: pages });
       }
     }
-    var orders = [], seen = {};
+    var orders = [], seen = {}, dupOrders = [];
     pdfs.forEach(function (p) {
       var isTT = p.pages.some(function (pg) { return /Order ID:\s*\d{15,}/.test(pg.text); });
       var cnt = 0;
       if (isTT) {
         parseTikTokPages(p.pages).forEach(function (o) {
-          var key = 'TT' + o.id; if (seen[key]) return; seen[key] = 1; cnt++;
+          var key = 'TT' + o.id; if (seen[key]) { dupOrders.push({ id: o.id, file: p.file, pages: o.pages.length, pageIdx: o.pages }); return; } seen[key] = 1; cnt++;
           var sum = o.items.reduce(function (a, b) { return a + b.qty; }, 0);
           orders.push({ platform: 'TikTok', id: o.id, shop: o.sender, file: p.file, buf: p.buf, pages: o.pages, items: o.items,
             problem: o.total != null && sum !== o.total ? 'Tổng SL đọc được (' + sum + ') khác Qty Total (' + o.total + ')' : '' });
+        });
+        // trang không đọc được Order ID: vẫn đưa vào "Cần kiểm tra" để không bị sót
+        var used = {};
+        orders.forEach(function (o) { if (o.file === p.file) o.pages.forEach(function (x) { used[x] = 1; }); });
+        dupOrders.forEach(function (d) { if (d.file === p.file && d.pageIdx) d.pageIdx.forEach(function (x) { used[x] = 1; }); });
+        p.pages.forEach(function (pg, idx) {
+          if (used[idx]) return;
+          orders.push({ platform: 'TikTok', id: 'trang ' + (idx + 1), shop: '', file: p.file, buf: p.buf, pages: [idx], items: [],
+            problem: 'Không đọc được Order ID trên trang này' });
+          cnt++;
         });
         sources.push({ file: p.file, type: 'TikTok PDF', orders: cnt, pages: p.pages.length });
       } else {
@@ -352,7 +370,11 @@ async function run() {
           for (k = 0; k < toks.length && !o; k++) o = excelOrders[toks[k]] || null;
           if (o) {
             var key = 'SP' + o.sn;
-            if (seen[key]) { seen[key].pages.push(idx); return; }
+            if (seen[key]) {
+              if (seen[key].file === p.file) seen[key].pages.push(idx);
+              else dupOrders.push({ id: o.sn, file: p.file, pages: 1 });
+              return;
+            }
             var rec = { platform: 'Shopee', id: o.sn, shop: '', file: p.file, buf: p.buf, pages: [idx], items: o.items, problem: '' };
             seen[key] = rec; orders.push(rec); cnt++;
           } else {
@@ -377,35 +399,52 @@ async function run() {
     orders.forEach(function (o) { var c = classify(o, splitSet); o.kho = c.kho; o.group = c.group; o.reason = c.reason;
       o.sig = o.items.map(function (x) { return x.sku; }).sort().join('+'); });
 
-    var groups = {};
-    orders.forEach(function (o) {
-      var key = o.group === CHECK ? CHECK : 'Kho ' + o.kho + ' – ' + o.group;
-      (groups[key] = groups[key] || { key: key, kho: o.kho, group: o.group, orders: [] }).orders.push(o);
-    });
-    var gl = Object.keys(groups).map(function (k) { return groups[k]; });
-    gl.sort(function (a, b) {
-      function rank(g) { return g.key === CHECK ? 9 : (g.kho === '1' ? 1 : 2) * 2 + (g.group === 'Mix' ? 1 : 0); }
-      return rank(a) - rank(b) || a.group.localeCompare(b.group, 'vi');
-    });
-    gl.forEach(function (g) {
-      g.orders.sort(function (a, b) { return a.sig.localeCompare(b.sig) || a.platform.localeCompare(b.platform) || a.id.localeCompare(b.id); });
-    });
-
-    msg.innerHTML = 'Đang tạo PDF…';
-    for (var gi = 0; gi < gl.length; gi++) {
-      var g = gl[gi];
-      g.file = String(gi + 1).padStart(2, '0') + '_' + slug(g.key) + '_' + g.orders.length + 'don.pdf';
-      g.bytes = await buildGroupPdf(g);
-    }
-    state.result = { groups: gl, orders: orders, sources: sources };
-    renderResult(warnings);
-    msg.innerHTML = '<span class="ok">Xong: ' + orders.length + ' đơn → ' + gl.length + ' nhóm.</span>' +
-      (warnings.length ? '<br><span class="warn">' + warnings.map(esc).join('<br>') + '</span>' : '');
+    var inPages = pdfs.reduce(function (a, p) { return a + p.pages.length; }, 0);
+    if (dupOrders.length) warnings.push(dupOrders.length + ' đơn bị trùng giữa các file (chỉ in 1 lần): ' +
+      dupOrders.slice(0, 8).map(function (d) { return d.id; }).join(', ') + (dupOrders.length > 8 ? '…' : ''));
+    state.parsed = { orders: orders, sources: sources, warnings: warnings, inPages: inPages,
+      dupPages: dupOrders.reduce(function (a, d) { return a + d.pages; }, 0) };
+    await buildOutput();
   } catch (e) {
     console.error(e);
     msg.innerHTML = '<span class="bad">Lỗi: ' + esc(e.message || e) + '</span>';
   }
   refreshRun();
+}
+
+function getMode() { var r = document.querySelector('input[name=mode]:checked'); return r ? r.value : 'split'; }
+async function buildOutput() {
+  var P = state.parsed, msg = $('runMsg'), mode = getMode();
+  try { localStorage.setItem('vd_mode', mode); } catch (e) {}
+  var groups = {};
+  P.orders.forEach(function (o) {
+    var base = o.group === CHECK ? CHECK : 'Kho ' + o.kho + ' – ' + o.group;
+    var key = mode === 'split' ? o.platform + ' – ' + base : base;
+    (groups[key] = groups[key] || { key: key, base: base, platform: mode === 'split' ? o.platform : '', kho: o.kho, group: o.group, orders: [] }).orders.push(o);
+  });
+  var gl = Object.keys(groups).map(function (k) { return groups[k]; });
+  gl.sort(function (a, b) {
+    function rank(g) { return g.base === CHECK ? 9 : (g.kho === '1' ? 1 : 2) * 2 + (g.group === 'Mix' ? 1 : 0); }
+    return a.platform.localeCompare(b.platform) || rank(a) - rank(b) || a.group.localeCompare(b.group, 'vi');
+  });
+  gl.forEach(function (g) {
+    g.orders.sort(function (a, b) { return a.platform.localeCompare(b.platform) || a.sig.localeCompare(b.sig) || a.id.localeCompare(b.id); });
+  });
+  for (var gi = 0; gi < gl.length; gi++) {
+    var g = gl[gi];
+    msg.innerHTML = 'Đang tạo PDF ' + (gi + 1) + '/' + gl.length + '…';
+    g.file = String(gi + 1).padStart(2, '0') + '_' + slug(g.key) + '_' + g.orders.length + 'don.pdf';
+    g.bytes = await buildGroupPdf(g);
+  }
+  // kiểm tra sót: mọi trang đầu vào phải có mặt đúng 1 lần ở đầu ra (trừ trang trùng)
+  var outPages = 0, outOrders = 0;
+  gl.forEach(function (g) { outOrders += g.orders.length; g.orders.forEach(function (o) { outPages += o.pages.length; }); });
+  var okCheck = outPages + P.dupPages === P.inPages && outOrders === P.orders.length;
+  P.check = { ok: okCheck, inPages: P.inPages, outPages: outPages, dupPages: P.dupPages, orders: outOrders };
+  state.result = { groups: gl, orders: P.orders, sources: P.sources };
+  renderResult();
+  msg.innerHTML = '<span class="ok">Xong: ' + P.orders.length + ' đơn → ' + gl.length + ' file.</span>' +
+    (P.warnings.length ? '<br><span class="warn">' + P.warnings.map(esc).join('<br>') + '</span>' : '');
 }
 
 /* ---------- PDF output ---------- */
@@ -505,6 +544,16 @@ function renderResult() {
     r.groups.map(function (g) { return g.orders.map(function (o) {
       return '<tr><td>' + o.platform + '</td><td>' + esc(o.id) + '</td><td>' + esc(o.items.map(function (x) { return x.sku + '×' + x.qty; }).join(', ')) +
         '</td><td>' + esc(g.key) + '</td><td class="bad small">' + esc(o.reason || '') + '</td></tr>'; }).join(''); }).join('');
+  var c = state.parsed && state.parsed.check;
+  if (c) {
+    var per = {};
+    r.orders.forEach(function (o) { per[o.platform] = (per[o.platform] || 0) + 1; });
+    $('checkBox').innerHTML = (c.ok ? '<b class="ok">✓ Không sót đơn</b>' : '<b class="bad">✗ Lệch số trang – cần kiểm tra</b>') +
+      ' · Đầu vào ' + c.inPages + ' trang vận đơn → đầu ra ' + c.outPages + ' trang' +
+      (c.dupPages ? ' (+' + c.dupPages + ' trang trùng đã bỏ)' : '') + ' · ' + c.orders + ' đơn (' +
+      Object.keys(per).map(function (k) { return k + ' ' + per[k]; }).join(', ') + ')' +
+      '<br><span class="small">Đối chiếu số đơn từng sàn/shop với số đơn đã chọn khi tạo phiếu trên Seller Center.</span>';
+  }
   $('outCard').hidden = false;
 }
 function csvReport() {
@@ -520,7 +569,16 @@ function csvReport() {
 try {
   var sv = localStorage.getItem('vd_split'); if (sv != null) $('splitGroups').value = sv;
   var su = localStorage.getItem('vd_url'); if (su) $('catUrl').value = su;
+  var sm = localStorage.getItem('vd_mode'); if (sm === 'mix' || sm === 'split') document.querySelector('input[name=mode][value=' + sm + ']').checked = true;
 } catch (e) {}
+Array.prototype.forEach.call(document.querySelectorAll('input[name=mode]'), function (el) {
+  el.onchange = async function () {
+    if (!state.parsed) return;
+    $('btnRun').disabled = true;
+    try { await buildOutput(); } catch (e) { console.error(e); $('runMsg').innerHTML = '<span class="bad">Lỗi: ' + esc(e.message || e) + '</span>'; }
+    refreshRun();
+  };
+});
 $('btnCat').onclick = fetchCatalog;
 $('catFile').onchange = async function () { var f = this.files[0]; if (!f) return;
   try { loadCatalogText(await f.text()); } catch (e) { $('catMsg').innerHTML = '<span class="bad">' + esc(e.message) + '</span>'; } };
@@ -530,7 +588,7 @@ $('files').onchange = function () { addFiles(this.files); this.value = ''; };
 drop.ondragover = function (e) { e.preventDefault(); drop.classList.add('over'); };
 drop.ondragleave = function () { drop.classList.remove('over'); };
 drop.ondrop = function (e) { e.preventDefault(); drop.classList.remove('over'); addFiles(e.dataTransfer.files); };
-$('btnClear').onclick = function () { state.files = []; renderFiles(); refreshRun(); $('outCard').hidden = true; $('runMsg').innerHTML = ''; };
+$('btnClear').onclick = function () { state.files = []; state.parsed = null; state.result = null; renderFiles(); refreshRun(); $('outCard').hidden = true; $('runMsg').innerHTML = ''; };
 $('btnRun').onclick = run;
 $('grpTable').onclick = function (e) { var b = e.target.closest('button[data-g]'); if (!b) return;
   var g = state.result.groups[+b.dataset.g]; download(g.file, new Blob([g.bytes], { type: 'application/pdf' })); };
