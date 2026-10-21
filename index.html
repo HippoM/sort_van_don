@@ -59,9 +59,9 @@ details summary{cursor:pointer;color:var(--mute)}
   <div id="fileList" class="msg"></div>
   <div class="row" style="margin-top:10px">
     <span class="small">Cách chia file:</span>
-    <label><input type="radio" name="mode" value="split" checked> Tách theo sàn (Shopee / TikTok riêng)</label>
-    <label><input type="radio" name="mode" value="mix"> Gộp các sàn</label>
-    <label style="margin-left:12px"><input type="checkbox" id="splitKho"> Tách file theo Kho 1 / Kho 2 / Mix</label>
+    <label><input type="radio" name="mode" value="split" checked> Tách theo sàn (Shopee / TikTok)</label>
+    <label><input type="radio" name="mode" value="mix"> Gộp sàn</label>
+    <label><input type="radio" name="mode" value="kho"> Tách theo Kho (Kho 1 / Kho 2 / Mix)</label>
   </div>
   <div class="row" style="margin-top:10px">
     <button class="pri" id="btnRun" disabled>Chia nhóm</button>
@@ -412,11 +412,11 @@ async function run() {
 
 function getMode() { var r = document.querySelector('input[name=mode]:checked'); return r ? r.value : 'split'; }
 async function buildOutput() {
-  var P = state.parsed, msg = $('runMsg'), mode = getMode(), splitKho = $('splitKho').checked;
+  var P = state.parsed, msg = $('runMsg'), mode = getMode(), splitKho = mode === 'kho';
   var splitSet = {};
   $('splitGroups').value.split(',').forEach(function (s) { s = s.trim().toLowerCase(); if (s) splitSet[s] = true; });
   try {
-    localStorage.setItem('vd_mode', mode); localStorage.setItem('vd_kho', splitKho ? '1' : '0');
+    localStorage.setItem('vd_mode', mode);
     localStorage.setItem('vd_split', $('splitGroups').value); localStorage.setItem('vd_url', $('catUrl').value);
   } catch (e) {}
   P.orders.forEach(function (o) { var c = classify(o, splitSet, splitKho);
@@ -575,10 +575,9 @@ function csvReport() {
 try {
   var sv = localStorage.getItem('vd_split'); if (sv != null) $('splitGroups').value = sv;
   var su = localStorage.getItem('vd_url'); if (su) $('catUrl').value = su;
-  var sm = localStorage.getItem('vd_mode'); if (sm === 'mix' || sm === 'split') document.querySelector('input[name=mode][value=' + sm + ']').checked = true;
+  var sm = localStorage.getItem('vd_mode'); if (sm === 'mix' || sm === 'split' || sm === 'kho') document.querySelector('input[name=mode][value=' + sm + ']').checked = true;
 } catch (e) {}
-try { if (localStorage.getItem('vd_kho') === '1') $('splitKho').checked = true; } catch (e) {}
-Array.prototype.forEach.call(document.querySelectorAll('input[name=mode], #splitKho'), function (el) {
+Array.prototype.forEach.call(document.querySelectorAll('input[name=mode]'), function (el) {
   el.onchange = async function () {
     if (!state.parsed) return;
     $('btnRun').disabled = true;
