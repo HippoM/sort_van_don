@@ -1,0 +1,538 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chia Vận Đơn</title>
+<style>
+:root{--bg:#f6f5f2;--card:#fff;--ink:#1d1d1b;--mute:#6b6a65;--line:#e3e1db;--acc:#ee4d2d;--ok:#1f8a4c;--warn:#b26a00;--bad:#c0392b}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+main{max-width:1080px;margin:0 auto;padding:20px 16px 60px}
+h1{font-size:22px;margin:0 0 4px}
+.sub{color:var(--mute);margin:0 0 18px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;margin-bottom:14px}
+.card h2{font-size:15px;margin:0 0 10px}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+input[type=text]{flex:1;min-width:220px;padding:7px 9px;border:1px solid var(--line);border-radius:6px;font:inherit}
+button,.btn{padding:8px 14px;border-radius:6px;border:1px solid var(--line);background:#fff;font:inherit;cursor:pointer}
+button.pri{background:var(--acc);border-color:var(--acc);color:#fff;font-weight:600}
+button:disabled{opacity:.45;cursor:default}
+#drop{border:2px dashed #c9c6bd;border-radius:10px;padding:26px;text-align:center;color:var(--mute);cursor:pointer}
+#drop.over{border-color:var(--acc);background:#fff4f1}
+table{border-collapse:collapse;width:100%;font-size:13px}
+th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+th{color:var(--mute);font-weight:600}
+td.n{text-align:right;font-variant-numeric:tabular-nums}
+.tag{display:inline-block;padding:1px 7px;border-radius:9px;font-size:12px;background:#eee}
+.ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}
+.msg{font-size:13px;margin-top:8px}
+.small{font-size:12px;color:var(--mute)}
+details summary{cursor:pointer;color:var(--mute)}
+.scroll{max-height:360px;overflow:auto}
+@media (max-width:600px){main{padding:14px 16px}th,td{padding:5px 4px}}
+</style>
+</head>
+<body>
+<main>
+<h1>Chia vận đơn theo nhóm SKU</h1>
+<p class="sub">Shopee: thả PDF phiếu gửi hàng + Excel phiếu đóng gói (tạo cùng lần). TikTok: thả PDF vận đơn. File chỉ xử lý trên máy này, không gửi đi đâu.</p>
+
+<div class="card">
+  <h2>1. Danh mục SKU (tab SKUxKHO)</h2>
+  <div class="row">
+    <input type="text" id="catUrl" value="https://docs.google.com/spreadsheets/d/e/2PACX-1vRyGAXsp27UoOd_TbRGO8Mz3pxSXhUKI8jOUYQGAOV7YIdjIoU7_met4A4zxVEASI_EWVvNSDPFtbNX/pub?gid=0&single=true&output=csv">
+    <button id="btnCat">Tải lại danh mục</button>
+    <label class="btn">Hoặc chọn file CSV<input type="file" id="catFile" accept=".csv" hidden></label>
+  </div>
+  <div class="row" style="margin-top:8px">
+    <span class="small">Nhóm tách theo số SKU (1 SKU / ≥2 SKU), cách nhau bởi dấu phẩy:</span>
+    <input type="text" id="splitGroups" value="Bình nhựa">
+  </div>
+  <div id="catMsg" class="msg small">Chưa tải danh mục.</div>
+</div>
+
+<div class="card">
+  <h2>2. Thả file từ sàn</h2>
+  <div id="drop">Kéo thả tất cả file PDF / Excel vào đây, hoặc bấm để chọn
+    <input type="file" id="files" multiple accept=".pdf,.xlsx" hidden></div>
+  <div id="fileList" class="msg"></div>
+  <div class="row" style="margin-top:10px">
+    <button class="pri" id="btnRun" disabled>Chia nhóm</button>
+    <button id="btnClear">Xoá file</button>
+  </div>
+  <div id="runMsg" class="msg"></div>
+</div>
+
+<div class="card" id="outCard" hidden>
+  <h2>3. Kết quả</h2>
+  <div class="row" style="margin-bottom:10px">
+    <button class="pri" id="btnZip">Tải tất cả (.zip)</button>
+    <button id="btnCsv">Tải bảng đối chiếu (.csv)</button>
+  </div>
+  <table id="grpTable"></table>
+  <h2 style="margin-top:18px">Số đơn theo file / shop</h2>
+  <table id="srcTable"></table>
+  <details style="margin-top:14px"><summary>Xem chi tiết từng đơn</summary>
+    <div class="scroll"><table id="ordTable"></table></div></details>
+</div>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
+<script type="module">
+import * as pdfjsLib from 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/legacy/build/pdf.min.mjs';
+pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/legacy/build/pdf.worker.min.mjs';
+
+var CHECK = 'Cần kiểm tra';
+var state = { files: [], catalog: null, result: null };
+var $ = function (id) { return document.getElementById(id); };
+
+/* ---------- helpers ---------- */
+function normSku(s) {
+  s = String(s == null ? '' : s).normalize('NFC').trim().toUpperCase();
+  s = s.replace(/\.0$/, '').replace(/^(HN_|TK_|EL_)/, '');
+  return s;
+}
+function ascii(s) {
+  return String(s).replace(/[\u2013\u2014]/g, '-').normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/đ/g, 'd').replace(/Đ/g, 'D').replace(/[^\x20-\x7E]/g, '');
+}
+function slug(s) { return ascii(s).replace(/[^A-Za-z0-9]+/g, '-').replace(/^-|-$/g, ''); }
+function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+function download(name, blob) {
+  var a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name;
+  document.body.appendChild(a); a.click(); setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 2000);
+}
+function readBuf(f) { return f.arrayBuffer(); }
+
+/* ---------- CSV ---------- */
+function parseCsv(text) {
+  var rows = [], row = [], f = '', q = false, i, c;
+  text = text.replace(/^﻿/, '');
+  for (i = 0; i < text.length; i++) {
+    c = text[i];
+    if (q) { if (c === '"') { if (text[i + 1] === '"') { f += '"'; i++; } else q = false; } else f += c; }
+    else if (c === '"') q = true;
+    else if (c === ',') { row.push(f); f = ''; }
+    else if (c === '\n' || c === '\r') { if (c === '\r' && text[i + 1] === '\n') i++; row.push(f); rows.push(row); row = []; f = ''; }
+    else f += c;
+  }
+  if (f !== '' || row.length) { row.push(f); rows.push(row); }
+  return rows;
+}
+function loadCatalogText(text) {
+  var rows = parseCsv(text).filter(function (r) { return r.some(function (x) { return x.trim(); }); });
+  if (!rows.length) throw new Error('File danh mục trống');
+  var h = rows[0].map(function (x) { return ascii(x).toLowerCase().replace(/[^a-z]/g, ''); });
+  var iS = h.indexOf('sku'), iK = h.indexOf('kho'), iN = h.indexOf('nhom'), iT = h.indexOf('tensp');
+  if (iS < 0 || iK < 0 || iN < 0) throw new Error('Thiếu cột SKU / Kho / Nhom ở dòng 1');
+  var map = {}, dup = [], bad = [];
+  rows.slice(1).forEach(function (r, k) {
+    var sku = normSku(r[iS]); if (!sku) return;
+    var kho = String(r[iK] || '').replace(/[^0-9]/g, '');
+    var nhom = String(r[iN] || '').trim();
+    if ((kho !== '1' && kho !== '2') || !nhom) { bad.push(sku); return; }
+    if (map[sku]) dup.push(sku);
+    map[sku] = { kho: kho, nhom: nhom, ten: iT >= 0 ? r[iT] : '' };
+  });
+  state.catalog = map;
+  var n = Object.keys(map).length;
+  var m = 'Đã tải <b>' + n + '</b> SKU.';
+  if (dup.length) m += ' <span class="warn">Trùng: ' + esc(dup.slice(0, 10).join(', ')) + '</span>';
+  if (bad.length) m += ' <span class="warn">Thiếu kho/nhóm (bỏ qua): ' + esc(bad.slice(0, 10).join(', ')) + (bad.length > 10 ? '…' : '') + '</span>';
+  $('catMsg').innerHTML = m;
+  refreshRun();
+}
+async function fetchCatalog() {
+  $('catMsg').textContent = 'Đang tải danh mục…';
+  try {
+    var r = await fetch($('catUrl').value.trim(), { cache: 'no-store' });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    loadCatalogText(await r.text());
+  } catch (e) {
+    $('catMsg').innerHTML = '<span class="bad">Không tải được danh mục: ' + esc(e.message) + '</span>. Kiểm tra link CSV hoặc chọn file CSV.';
+  }
+}
+
+/* ---------- minimal XLSX reader (zip + xml) ---------- */
+async function unzip(buf) {
+  var dv = new DataView(buf), u8 = new Uint8Array(buf), out = {};
+  var eocd = -1;
+  for (var i = u8.length - 22; i >= 0; i--) if (dv.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
+  if (eocd < 0) throw new Error('Không phải file xlsx');
+  var n = dv.getUint16(eocd + 10, true), p = dv.getUint32(eocd + 16, true);
+  for (var k = 0; k < n; k++) {
+    var method = dv.getUint16(p + 10, true), csize = dv.getUint32(p + 20, true);
+    var nlen = dv.getUint16(p + 28, true), xlen = dv.getUint16(p + 30, true), clen = dv.getUint16(p + 32, true);
+    var lho = dv.getUint32(p + 42, true);
+    var name = new TextDecoder().decode(u8.subarray(p + 46, p + 46 + nlen));
+    var ds = lho + 30 + dv.getUint16(lho + 26, true) + dv.getUint16(lho + 28, true);
+    var data = u8.subarray(ds, ds + csize);
+    if (method === 8) {
+      var st = new Blob([data]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+      data = new Uint8Array(await new Response(st).arrayBuffer());
+    }
+    out[name] = data;
+    p += 46 + nlen + xlen + clen;
+  }
+  return out;
+}
+async function readXlsx(buf) {
+  var z = await unzip(buf), td = new TextDecoder(), dp = new DOMParser();
+  var ss = [];
+  if (z['xl/sharedStrings.xml']) {
+    var sx = dp.parseFromString(td.decode(z['xl/sharedStrings.xml']), 'application/xml');
+    Array.prototype.forEach.call(sx.getElementsByTagName('si'), function (si) {
+      var t = ''; Array.prototype.forEach.call(si.getElementsByTagName('t'), function (e) { t += e.textContent; }); ss.push(t);
+    });
+  }
+  var sheetName = Object.keys(z).filter(function (k) { return /^xl\/worksheets\/sheet\d+\.xml$/.test(k); }).sort()[0];
+  var x = dp.parseFromString(td.decode(z[sheetName]), 'application/xml');
+  var rows = [];
+  Array.prototype.forEach.call(x.getElementsByTagName('row'), function (r) {
+    var arr = [];
+    Array.prototype.forEach.call(r.getElementsByTagName('c'), function (c) {
+      var ref = c.getAttribute('r'), col = 0, m = ref.match(/^[A-Z]+/)[0];
+      for (var i = 0; i < m.length; i++) col = col * 26 + (m.charCodeAt(i) - 64);
+      var t = c.getAttribute('t'), v = c.getElementsByTagName('v')[0], val = '';
+      if (t === 's' && v) val = ss[+v.textContent];
+      else if (t === 'inlineStr') { var is = c.getElementsByTagName('t')[0]; val = is ? is.textContent : ''; }
+      else if (v) val = v.textContent;
+      arr[col - 1] = val;
+    });
+    rows.push(arr);
+  });
+  return rows;
+}
+function parseShopeeExcel(rows) {
+  var h = (rows[0] || []).map(function (x) { return String(x || '').trim(); });
+  var iT = h.indexOf('tracking_number'), iO = h.indexOf('order_sn'), iP = h.indexOf('product_info');
+  if (iO < 0 || iP < 0) return null;
+  var orders = [];
+  rows.slice(1).forEach(function (r) {
+    var sn = String(r[iO] || '').trim(); if (!sn) return;
+    var info = String(r[iP] || ''), items = [];
+    info.split(/\[\d+\]\s*/).forEach(function (seg) {
+      if (!/Quantity:/.test(seg)) return;
+      var q = (seg.match(/Quantity:\s*(\d+)/) || [])[1];
+      var sku = (seg.match(/SKU Reference No\.:\s*([^;]*)/) || [])[1] || '';
+      var par = (seg.match(/Parent SKU Reference No\.:\s*([^;]*)/) || [])[1] || '';
+      var name = (seg.match(/Product Name:\s*([^;]*)/) || [])[1] || '';
+      var s = normSku(sku) || normSku(par);
+      items.push({ sku: s, qty: +q || 0, name: name.trim(), fromParent: !normSku(sku) && !!s });
+    });
+    orders.push({ sn: sn, tracking: iT >= 0 ? String(r[iT] || '').trim() : '', items: items });
+  });
+  return orders;
+}
+
+/* ---------- PDF parsing ---------- */
+async function pdfPages(buf) {
+  var task = pdfjsLib.getDocument({ data: new Uint8Array(buf.slice(0)) });
+  var doc = await task.promise;
+  var pages = [];
+  for (var i = 1; i <= doc.numPages; i++) {
+    var pg = await doc.getPage(i), tc = await pg.getTextContent();
+    var items = tc.items.filter(function (it) { return it.str && it.str.trim(); })
+      .map(function (it) { return { s: it.str, x: it.transform[4], y: it.transform[5] }; });
+    pages.push({ items: items, text: items.map(function (it) { return it.s; }).join(' ') });
+  }
+  try { await task.destroy(); } catch (e) {}
+  return pages;
+}
+function parseTikTokPages(pages) {
+  // returns orders [{id, pages:[idx], items:[{sku,qty}], total, sender}]
+  var byId = {}, list = [];
+  pages.forEach(function (pg, idx) {
+    var m = pg.text.match(/Order ID:\s*(\d{15,})/g);
+    if (!m) return;
+    var id = m[m.length - 1].replace(/\D/g, '');
+    var o = byId[id];
+    if (!o) { o = byId[id] = { id: id, pages: [], items: [], total: null, sender: '' }; list.push(o); }
+    o.pages.push(idx);
+    var tot = pg.text.match(/Qty Total:\s*(\d+)/);
+    if (tot) o.total = +tot[1];
+    var it = pg.items;
+    var sIdx = it.findIndex(function (a) { return a.s.trim() === 'Người gửi'; });
+    if (sIdx >= 0 && !o.sender) {
+      var sy = it[sIdx].y, parts = it.filter(function (a) { return a.x > it[sIdx].x + 10 && a.y <= sy + 8 && a.y >= sy - 12; });
+      parts.sort(function (a, b) { return b.y - a.y; }); o.sender = parts.map(function (a) { return a.s; }).join('').trim();
+    }
+    var hSel = it.find(function (a) { return a.s.trim() === 'Seller SKU'; });
+    var hQty = it.find(function (a) { return a.s.trim() === 'Qty' && hSel && Math.abs(a.y - hSel.y) < 2; });
+    if (!hSel || !hQty) return;
+    var bottom = -1;
+    it.forEach(function (a) { if (/^(Qty Total:|Order ID:)/.test(a.s.trim()) && a.y < hSel.y && a.y > bottom) bottom = a.y; });
+    var qtys = it.filter(function (a) { return a.x >= hQty.x - 6 && a.y < hSel.y - 2 && a.y > bottom + 1 && /^\d{1,4}$/.test(a.s.trim()); })
+      .sort(function (a, b) { return b.y - a.y; });
+    var skuCol = it.filter(function (a) { return a.x >= hSel.x - 3 && a.x < hQty.x - 6 && a.y < hSel.y - 2 && a.y > bottom + 1; });
+    qtys.forEach(function (q, k) {
+      var lower = k + 1 < qtys.length ? qtys[k + 1].y : bottom;
+      var segs = skuCol.filter(function (a) { return a.y <= q.y + 1 && a.y > lower + 1; }).sort(function (a, b) { return b.y - a.y; });
+      o.items.push({ sku: normSku(segs.map(function (a) { return a.s.trim(); }).join('')), qty: +q.s.trim() });
+    });
+  });
+  return list;
+}
+
+/* ---------- file intake ---------- */
+function addFiles(fl) {
+  Array.prototype.forEach.call(fl, function (f) {
+    if (!/\.(pdf|xlsx)$/i.test(f.name)) return;
+    if (state.files.some(function (x) { return x.name === f.name && x.size === f.size; })) return;
+    state.files.push(f);
+  });
+  renderFiles(); refreshRun();
+}
+function renderFiles() {
+  $('fileList').innerHTML = state.files.length ? state.files.map(function (f) {
+    return '<span class="tag">' + esc(f.name) + '</span>';
+  }).join(' ') : '<span class="small">Chưa có file.</span>';
+}
+function refreshRun() { $('btnRun').disabled = !(state.files.length && state.catalog); }
+
+/* ---------- classify ---------- */
+function classify(o, splitSet) {
+  // o.items: [{sku, qty}]
+  if (o.problem) return { kho: '', group: CHECK, reason: o.problem };
+  if (!o.items.length) return { kho: '', group: CHECK, reason: 'Không đọc được sản phẩm' };
+  var cat = state.catalog, skus = {}, missing = [];
+  o.items.forEach(function (it) {
+    if (!it.sku) { missing.push('(trống)'); return; }
+    skus[it.sku] = true;
+    if (!cat[it.sku]) missing.push(it.sku);
+  });
+  if (missing.length) return { kho: '', group: CHECK, reason: 'SKU chưa có trong danh mục: ' + missing.join(', ') };
+  var list = Object.keys(skus), c1 = 0, c2 = 0, nhoms = {};
+  list.forEach(function (s) { if (cat[s].kho === '1') c1++; else c2++; nhoms[cat[s].nhom] = true; });
+  var kho = c2 >= c1 ? '2' : '1';
+  var nl = Object.keys(nhoms), group;
+  if (nl.length === 1) {
+    group = nl[0];
+    if (splitSet[nl[0].toLowerCase()]) group += list.length === 1 ? ' – 1 SKU' : ' – từ 2 SKU';
+  } else group = 'Mix';
+  return { kho: kho, group: group, reason: '' };
+}
+
+/* ---------- run ---------- */
+async function run() {
+  $('btnRun').disabled = true; $('outCard').hidden = true;
+  var msg = $('runMsg'); msg.innerHTML = 'Đang đọc file…';
+  try {
+    var excelOrders = {}, pdfs = [], sources = [], warnings = [];
+    for (var i = 0; i < state.files.length; i++) {
+      var f = state.files[i];
+      msg.innerHTML = 'Đang đọc ' + esc(f.name) + ' (' + (i + 1) + '/' + state.files.length + ')…';
+      var buf = await readBuf(f);
+      if (/\.xlsx$/i.test(f.name)) {
+        var so = parseShopeeExcel(await readXlsx(buf));
+        if (!so) { warnings.push(f.name + ': không phải phiếu đóng gói Shopee (thiếu cột order_sn/product_info)'); continue; }
+        so.forEach(function (o) { excelOrders[o.sn] = o; if (o.tracking) excelOrders[o.tracking] = o; });
+        sources.push({ file: f.name, type: 'Shopee Excel', orders: so.length, pages: '' });
+      } else {
+        var pages = await pdfPages(buf);
+        pdfs.push({ file: f.name, buf: buf, pages: pages });
+      }
+    }
+    var orders = [], seen = {};
+    pdfs.forEach(function (p) {
+      var isTT = p.pages.some(function (pg) { return /Order ID:\s*\d{15,}/.test(pg.text); });
+      var cnt = 0;
+      if (isTT) {
+        parseTikTokPages(p.pages).forEach(function (o) {
+          var key = 'TT' + o.id; if (seen[key]) return; seen[key] = 1; cnt++;
+          var sum = o.items.reduce(function (a, b) { return a + b.qty; }, 0);
+          orders.push({ platform: 'TikTok', id: o.id, shop: o.sender, file: p.file, buf: p.buf, pages: o.pages, items: o.items,
+            problem: o.total != null && sum !== o.total ? 'Tổng SL đọc được (' + sum + ') khác Qty Total (' + o.total + ')' : '' });
+        });
+        sources.push({ file: p.file, type: 'TikTok PDF', orders: cnt, pages: p.pages.length });
+      } else {
+        var unmatched = 0;
+        p.pages.forEach(function (pg, idx) {
+          var toks = pg.text.replace(/\s+/g, ' ').match(/[A-Z0-9]{10,}/g) || [], o = null, k;
+          for (k = 0; k < toks.length && !o; k++) o = excelOrders[toks[k]] || null;
+          if (o) {
+            var key = 'SP' + o.sn;
+            if (seen[key]) { seen[key].pages.push(idx); return; }
+            var rec = { platform: 'Shopee', id: o.sn, shop: '', file: p.file, buf: p.buf, pages: [idx], items: o.items, problem: '' };
+            seen[key] = rec; orders.push(rec); cnt++;
+          } else {
+            var guess = (pg.text.replace(/\s+/g, '').match(/\d{6}[A-Z0-9]{8}/) || [''])[0];
+            orders.push({ platform: 'Shopee', id: guess || ('trang ' + (idx + 1)), shop: '', file: p.file, buf: p.buf, pages: [idx], items: [],
+              problem: 'Không có trong Excel phiếu đóng gói' });
+            unmatched++; cnt++;
+          }
+        });
+        sources.push({ file: p.file, type: 'Shopee PDF', orders: cnt, pages: p.pages.length, unmatched: unmatched });
+      }
+    });
+    // Excel orders without PDF page
+    var inPdf = {}; orders.forEach(function (o) { if (o.platform === 'Shopee') inPdf[o.id] = 1; });
+    var noPage = Object.keys(excelOrders).filter(function (k) { var o = excelOrders[k]; return k === o.sn && !inPdf[o.sn]; });
+    if (noPage.length) warnings.push(noPage.length + ' đơn có trong Excel nhưng không có trang PDF: ' + noPage.slice(0, 8).join(', ') + (noPage.length > 8 ? '…' : ''));
+
+    var splitSet = {};
+    $('splitGroups').value.split(',').forEach(function (s) { s = s.trim().toLowerCase(); if (s) splitSet[s] = true; });
+    try { localStorage.setItem('vd_split', $('splitGroups').value); localStorage.setItem('vd_url', $('catUrl').value); } catch (e) {}
+
+    orders.forEach(function (o) { var c = classify(o, splitSet); o.kho = c.kho; o.group = c.group; o.reason = c.reason;
+      o.sig = o.items.map(function (x) { return x.sku; }).sort().join('+'); });
+
+    var groups = {};
+    orders.forEach(function (o) {
+      var key = o.group === CHECK ? CHECK : 'Kho ' + o.kho + ' – ' + o.group;
+      (groups[key] = groups[key] || { key: key, kho: o.kho, group: o.group, orders: [] }).orders.push(o);
+    });
+    var gl = Object.keys(groups).map(function (k) { return groups[k]; });
+    gl.sort(function (a, b) {
+      function rank(g) { return g.key === CHECK ? 9 : (g.kho === '1' ? 1 : 2) * 2 + (g.group === 'Mix' ? 1 : 0); }
+      return rank(a) - rank(b) || a.group.localeCompare(b.group, 'vi');
+    });
+    gl.forEach(function (g) {
+      g.orders.sort(function (a, b) { return a.sig.localeCompare(b.sig) || a.platform.localeCompare(b.platform) || a.id.localeCompare(b.id); });
+    });
+
+    msg.innerHTML = 'Đang tạo PDF…';
+    for (var gi = 0; gi < gl.length; gi++) {
+      var g = gl[gi];
+      g.file = String(gi + 1).padStart(2, '0') + '_' + slug(g.key) + '_' + g.orders.length + 'don.pdf';
+      g.bytes = await buildGroupPdf(g);
+    }
+    state.result = { groups: gl, orders: orders, sources: sources };
+    renderResult(warnings);
+    msg.innerHTML = '<span class="ok">Xong: ' + orders.length + ' đơn → ' + gl.length + ' nhóm.</span>' +
+      (warnings.length ? '<br><span class="warn">' + warnings.map(esc).join('<br>') + '</span>' : '');
+  } catch (e) {
+    console.error(e);
+    msg.innerHTML = '<span class="bad">Lỗi: ' + esc(e.message || e) + '</span>';
+  }
+  refreshRun();
+}
+
+/* ---------- PDF output ---------- */
+var srcCache = new WeakMap();
+async function srcDoc(buf) {
+  if (!srcCache.has(buf)) srcCache.set(buf, await PDFLib.PDFDocument.load(buf, { ignoreEncryption: true }));
+  return srcCache.get(buf);
+}
+async function buildGroupPdf(g) {
+  var out = await PDFLib.PDFDocument.create();
+  var font = await out.embedFont(PDFLib.StandardFonts.Helvetica);
+  var bold = await out.embedFont(PDFLib.StandardFonts.HelveticaBold);
+  // pick list
+  var tally = {}, kinds = 0;
+  g.orders.forEach(function (o) { o.items.forEach(function (it) {
+    var k = it.sku || '(khong doc duoc)'; if (!tally[k]) { tally[k] = { q: 0, n: 0 }; kinds++; } tally[k].q += it.qty; tally[k].n++; }); });
+  var keys = Object.keys(tally).sort();
+  var W = 298, H = 420, lines = [];
+  keys.forEach(function (k) { lines.push(k); });
+  var perPage = 30, pageCount = Math.max(1, Math.ceil(lines.length / perPage));
+  var totalQty = keys.reduce(function (a, k) { return a + tally[k].q; }, 0);
+  for (var p = 0; p < pageCount; p++) {
+    var pg = out.addPage([W, H]), y = H - 28;
+    pg.drawText(ascii(g.key), { x: 14, y: y, size: 13, font: bold }); y -= 16;
+    pg.drawText('PHIEU NHAT HANG  ' + g.orders.length + ' don  ' + totalQty + ' sp  ' + kinds + ' SKU' + (pageCount > 1 ? '  (' + (p + 1) + '/' + pageCount + ')' : ''), { x: 14, y: y, size: 8.5, font: font }); y -= 8;
+    pg.drawLine({ start: { x: 14, y: y }, end: { x: W - 14, y: y }, thickness: 0.6 }); y -= 13;
+    pg.drawText('SKU', { x: 14, y: y, size: 8, font: bold });
+    pg.drawText('SL', { x: W - 70, y: y, size: 8, font: bold });
+    pg.drawText('So don', { x: W - 44, y: y, size: 8, font: bold }); y -= 12;
+    lines.slice(p * perPage, (p + 1) * perPage).forEach(function (k) {
+      pg.drawText(ascii(k).slice(0, 38), { x: 14, y: y, size: 9, font: font });
+      pg.drawText(String(tally[k].q), { x: W - 70, y: y, size: 9, font: bold });
+      pg.drawText(String(tally[k].n), { x: W - 40, y: y, size: 9, font: font });
+      y -= 11.5;
+    });
+  }
+  // labels
+  for (var i = 0; i < g.orders.length; i++) {
+    var o = g.orders[i], src = await srcDoc(o.buf);
+    var copied = await out.copyPages(src, o.pages);
+    copied.forEach(function (cp) { out.addPage(cp); });
+  }
+  return await out.save();
+}
+
+/* ---------- zip (store) ---------- */
+var crcT = (function () { var t = new Uint32Array(256); for (var n = 0; n < 256; n++) { var c = n; for (var k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
+function crc32(u) { var c = 0xFFFFFFFF; for (var i = 0; i < u.length; i++) c = crcT[(c ^ u[i]) & 255] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; }
+function makeZip(files) {
+  var enc = new TextEncoder(), parts = [], central = [], off = 0;
+  files.forEach(function (f) {
+    var name = enc.encode(f.name), data = f.data, crc = crc32(data);
+    var h = new DataView(new ArrayBuffer(30));
+    h.setUint32(0, 0x04034b50, true); h.setUint16(4, 20, true); h.setUint16(6, 0x0800, true);
+    h.setUint32(14, crc, true); h.setUint32(18, data.length, true); h.setUint32(22, data.length, true); h.setUint16(26, name.length, true);
+    parts.push(new Uint8Array(h.buffer), name, data);
+    var c = new DataView(new ArrayBuffer(46));
+    c.setUint32(0, 0x02014b50, true); c.setUint16(4, 20, true); c.setUint16(6, 20, true); c.setUint16(8, 0x0800, true);
+    c.setUint32(16, crc, true); c.setUint32(20, data.length, true); c.setUint32(24, data.length, true); c.setUint16(28, name.length, true);
+    c.setUint32(42, off, true);
+    central.push(new Uint8Array(c.buffer), name);
+    off += 30 + name.length + data.length;
+  });
+  var csize = central.reduce(function (a, b) { return a + b.length; }, 0);
+  var e = new DataView(new ArrayBuffer(22));
+  e.setUint32(0, 0x06054b50, true); e.setUint16(8, files.length, true); e.setUint16(10, files.length, true);
+  e.setUint32(12, csize, true); e.setUint32(16, off, true);
+  return new Blob(parts.concat(central, [new Uint8Array(e.buffer)]), { type: 'application/zip' });
+}
+
+/* ---------- render ---------- */
+function stamp() { var d = new Date(); return d.getFullYear() + String(d.getMonth() + 1).padStart(2, '0') + String(d.getDate()).padStart(2, '0') + '-' + String(d.getHours()).padStart(2, '0') + String(d.getMinutes()).padStart(2, '0'); }
+function renderResult() {
+  var r = state.result;
+  $('grpTable').innerHTML = '<tr><th>File</th><th>Nhóm</th><th class="n">Đơn</th><th class="n">Trang</th><th></th></tr>' +
+    r.groups.map(function (g, i) {
+      var pages = g.orders.reduce(function (a, o) { return a + o.pages.length; }, 0);
+      return '<tr><td class="small">' + esc(g.file) + '</td><td' + (g.key === CHECK ? ' class="bad"' : '') + '>' + esc(g.key) + '</td><td class="n">' + g.orders.length +
+        '</td><td class="n">' + pages + '</td><td><button data-g="' + i + '">Tải PDF</button></td></tr>';
+    }).join('');
+  $('srcTable').innerHTML = '<tr><th>File</th><th>Loại</th><th>Shop</th><th class="n">Đơn</th><th class="n">Trang</th></tr>' +
+    r.sources.map(function (s) {
+      var shops = {};
+      r.orders.forEach(function (o) { if (o.file === s.file && o.shop) shops[o.shop] = 1; });
+      return '<tr><td class="small">' + esc(s.file) + '</td><td>' + s.type + '</td><td>' + esc(Object.keys(shops).join(', ')) + '</td><td class="n">' + s.orders +
+        (s.unmatched ? ' <span class="bad">(' + s.unmatched + ' thiếu Excel)</span>' : '') + '</td><td class="n">' + s.pages + '</td></tr>';
+    }).join('');
+  $('ordTable').innerHTML = '<tr><th>Sàn</th><th>Mã đơn</th><th>SKU × SL</th><th>Nhóm</th><th>Ghi chú</th></tr>' +
+    r.groups.map(function (g) { return g.orders.map(function (o) {
+      return '<tr><td>' + o.platform + '</td><td>' + esc(o.id) + '</td><td>' + esc(o.items.map(function (x) { return x.sku + '×' + x.qty; }).join(', ')) +
+        '</td><td>' + esc(g.key) + '</td><td class="bad small">' + esc(o.reason || '') + '</td></tr>'; }).join(''); }).join('');
+  $('outCard').hidden = false;
+}
+function csvReport() {
+  var rows = [['Nhom', 'San', 'Shop', 'Ma don', 'SKU', 'SL', 'So SKU', 'Ghi chu', 'File nguon']];
+  state.result.groups.forEach(function (g) { g.orders.forEach(function (o) {
+    rows.push([g.key, o.platform, o.shop, o.id, o.items.map(function (x) { return x.sku; }).join(' + '),
+      o.items.map(function (x) { return x.qty; }).join(' + '), o.items.length, o.reason || '', o.file]); }); });
+  var csv = '﻿' + rows.map(function (r) { return r.map(function (c) { c = String(c == null ? '' : c); return /[",\n]/.test(c) ? '"' + c.replace(/"/g, '""') + '"' : c; }).join(','); }).join('\r\n');
+  download('doi-chieu_' + stamp() + '.csv', new Blob([csv], { type: 'text/csv' }));
+}
+
+/* ---------- wire ---------- */
+try {
+  var sv = localStorage.getItem('vd_split'); if (sv != null) $('splitGroups').value = sv;
+  var su = localStorage.getItem('vd_url'); if (su) $('catUrl').value = su;
+} catch (e) {}
+$('btnCat').onclick = fetchCatalog;
+$('catFile').onchange = async function () { var f = this.files[0]; if (!f) return;
+  try { loadCatalogText(await f.text()); } catch (e) { $('catMsg').innerHTML = '<span class="bad">' + esc(e.message) + '</span>'; } };
+var drop = $('drop');
+drop.onclick = function () { $('files').click(); };
+$('files').onchange = function () { addFiles(this.files); this.value = ''; };
+drop.ondragover = function (e) { e.preventDefault(); drop.classList.add('over'); };
+drop.ondragleave = function () { drop.classList.remove('over'); };
+drop.ondrop = function (e) { e.preventDefault(); drop.classList.remove('over'); addFiles(e.dataTransfer.files); };
+$('btnClear').onclick = function () { state.files = []; renderFiles(); refreshRun(); $('outCard').hidden = true; $('runMsg').innerHTML = ''; };
+$('btnRun').onclick = run;
+$('grpTable').onclick = function (e) { var b = e.target.closest('button[data-g]'); if (!b) return;
+  var g = state.result.groups[+b.dataset.g]; download(g.file, new Blob([g.bytes], { type: 'application/pdf' })); };
+$('btnZip').onclick = function () {
+  download('van-don_' + stamp() + '.zip', makeZip(state.result.groups.map(function (g) { return { name: g.file, data: g.bytes }; })));
+};
+$('btnCsv').onclick = csvReport;
+renderFiles();
+fetchCatalog();
+window.__vd = { state: state, addFiles: addFiles, run: run, loadCatalogText: loadCatalogText };
+</script>
+</body>
+</html>
