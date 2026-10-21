@@ -41,9 +41,7 @@ details summary{cursor:pointer;color:var(--mute)}
 <div class="card">
   <h2>1. Danh mục SKU (tab SKUxKHO)</h2>
   <div class="row">
-    <input type="text" id="catUrl" value="https://docs.google.com/spreadsheets/d/e/2PACX-1vRyGAXsp27UoOd_TbRGO8Mz3pxSXhUKI8jOUYQGAOV7YIdjIoU7_met4A4zxVEASI_EWVvNSDPFtbNX/pub?gid=0&single=true&output=csv">
-    <button id="btnCat">Tải lại danh mục</button>
-    <label class="btn">Hoặc chọn file CSV<input type="file" id="catFile" accept=".csv" hidden></label>
+    <a class="btn" id="sheetLink" target="_blank" rel="noopener" style="text-decoration:none;color:inherit">Mở Google Sheet danh mục ↗</a>
   </div>
   <div class="row" style="margin-top:8px">
     <span class="small">Nhóm tách theo số SKU (1 SKU / ≥2 SKU), cách nhau bởi dấu phẩy:</span>
@@ -90,6 +88,11 @@ details summary{cursor:pointer;color:var(--mute)}
 import * as pdfjsLib from 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/legacy/build/pdf.min.mjs';
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/legacy/build/pdf.worker.min.mjs';
 
+// Danh mục SKU: link CSV đã "Công bố lên web" (tool đọc) và link mở Google Sheet để sửa (nút trên trang)
+var CAT_CSV_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vRyGAXsp27UoOd_TbRGO8Mz3pxSXhUKI8jOUYQGAOV7YIdjIoU7_met4A4zxVEASI_EWVvNSDPFtbNX/pub?gid=0&single=true&output=csv';
+var SHEET_ID = '1VV1mB2qJkcdWYcDrwQxVRNDmShE3-JRjdWAgKDqZUU8';
+var SHEET_EDIT_URL = 'https://docs.google.com/spreadsheets/d/' + SHEET_ID + '/edit?gid=0#gid=0';
+var CAT_LIVE_URL = 'https://docs.google.com/spreadsheets/d/' + SHEET_ID + '/gviz/tq?tqx=out:csv&headers=1&gid=0';
 var CHECK = 'Cần kiểm tra';
 var state = { files: [], catalog: null, result: null };
 var $ = function (id) { return document.getElementById(id); };
@@ -126,7 +129,7 @@ function parseCsv(text) {
   if (f !== '' || row.length) { row.push(f); rows.push(row); }
   return rows;
 }
-function loadCatalogText(text) {
+function parseCatalog(text) {
   var rows = parseCsv(text).filter(function (r) { return r.some(function (x) { return x.trim(); }); });
   if (!rows.length) throw new Error('File danh mục trống');
   var h = rows[0].map(function (x) { return ascii(x).toLowerCase().replace(/[^a-z]/g, ''); });
@@ -142,9 +145,20 @@ function loadCatalogText(text) {
     if (map[sku]) dup.push(sku);
     map[sku] = { kho: kho, nhom: nhom, ten: iT >= 0 ? r[iT] : '' };
   });
+  return { map: map, dup: dup, bad: bad, noNhom: noNhom };
+}
+// text: dữ liệu chính; backupText (tuỳ chọn): bổ sung SKU mà dữ liệu chính thiếu
+function loadCatalogText(text, backupText, sourceNote) {
+  var c = parseCatalog(text), map = c.map, dup = c.dup, bad = c.bad, noNhom = c.noNhom, added = 0;
+  if (backupText) {
+    try {
+      var b = parseCatalog(backupText).map;
+      Object.keys(b).forEach(function (k) { if (!map[k]) { map[k] = b[k]; added++; } });
+    } catch (e) {}
+  }
   state.catalog = map;
   var n = Object.keys(map).length;
-  var m = 'Đã tải <b>' + n + '</b> SKU.';
+  var m = 'Đã tải <b>' + n + '</b> SKU' + (sourceNote ? ' <span class="small">(' + sourceNote + ')</span>' : '') + '.';
   if (dup.length) m += ' <span class="warn">Trùng: ' + esc(dup.slice(0, 10).join(', ')) + '</span>';
   if (noNhom) m += ' <span class="warn">' + noNhom + ' SKU chưa điền Nhom (tạm xếp vào "Chưa có nhóm").</span>';
   if (bad.length) m += ' <span class="warn">' + bad.length + ' SKU thiếu Kho 1/2 (bỏ qua): ' + esc(bad.slice(0, 10).join(', ')) + (bad.length > 10 ? '…' : '') + '</span>';
@@ -153,12 +167,24 @@ function loadCatalogText(text) {
 }
 async function fetchCatalog() {
   $('catMsg').textContent = 'Đang tải danh mục…';
+  function get(url) {
+    return fetch(url, { cache: 'no-store' }).then(function (r) {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.text();
+    }).then(function (t) { if (/^\s*</.test(t)) throw new Error('Không phải CSV (sheet chưa chia sẻ?)'); return t; });
+  }
+  // Ưu tiên dữ liệu trực tiếp (cập nhật ngay, cần sheet chia sẻ "Bất kỳ ai có link – Người xem");
+  // bản "Công bố lên web" (trễ vài phút) dùng dự phòng và bổ sung SKU nếu thiếu.
+  var res = await Promise.allSettled([get(CAT_LIVE_URL), get(CAT_CSV_URL)]);
+  var live = res[0].status === 'fulfilled' ? res[0].value : null, pub = res[1].status === 'fulfilled' ? res[1].value : null;
   try {
-    var r = await fetch($('catUrl').value.trim(), { cache: 'no-store' });
-    if (!r.ok) throw new Error('HTTP ' + r.status);
-    loadCatalogText(await r.text());
+    if (live) {
+      try { loadCatalogText(live, pub, 'dữ liệu trực tiếp'); return; } catch (e) { if (!pub) throw e; }
+    }
+    if (pub) { loadCatalogText(pub, null, 'bản công bố – thay đổi mới có thể trễ vài phút'); return; }
+    throw (res[1].reason || res[0].reason || new Error('không rõ'));
   } catch (e) {
-    $('catMsg').innerHTML = '<span class="bad">Không tải được danh mục: ' + esc(e.message) + '</span>. Kiểm tra link CSV hoặc chọn file CSV.';
+    $('catMsg').innerHTML = '<span class="bad">Không tải được danh mục: ' + esc(e.message || e) + '</span>. Kiểm tra quyền chia sẻ Google Sheet, rồi tải lại trang.';
   }
 }
 
@@ -417,7 +443,7 @@ async function buildOutput() {
   $('splitGroups').value.split(',').forEach(function (s) { s = s.trim().toLowerCase(); if (s) splitSet[s] = true; });
   try {
     localStorage.setItem('vd_mode', mode);
-    localStorage.setItem('vd_split', $('splitGroups').value); localStorage.setItem('vd_url', $('catUrl').value);
+    localStorage.setItem('vd_split', $('splitGroups').value);
   } catch (e) {}
   P.orders.forEach(function (o) { var c = classify(o, splitSet, splitKho);
     o.kho = c.kho; o.group = c.group; o.reason = c.reason; o.khoSort = c.khoSort || '9'; });
@@ -574,7 +600,6 @@ function csvReport() {
 /* ---------- wire ---------- */
 try {
   var sv = localStorage.getItem('vd_split'); if (sv != null) $('splitGroups').value = sv;
-  var su = localStorage.getItem('vd_url'); if (su) $('catUrl').value = su;
   var sm = localStorage.getItem('vd_mode'); if (sm === 'mix' || sm === 'split' || sm === 'kho') document.querySelector('input[name=mode][value=' + sm + ']').checked = true;
 } catch (e) {}
 Array.prototype.forEach.call(document.querySelectorAll('input[name=mode]'), function (el) {
@@ -585,9 +610,7 @@ Array.prototype.forEach.call(document.querySelectorAll('input[name=mode]'), func
     refreshRun();
   };
 });
-$('btnCat').onclick = fetchCatalog;
-$('catFile').onchange = async function () { var f = this.files[0]; if (!f) return;
-  try { loadCatalogText(await f.text()); } catch (e) { $('catMsg').innerHTML = '<span class="bad">' + esc(e.message) + '</span>'; } };
+$('sheetLink').href = SHEET_EDIT_URL;
 var drop = $('drop');
 drop.onclick = function () { $('files').click(); };
 $('files').onchange = function () { addFiles(this.files); this.value = ''; };
