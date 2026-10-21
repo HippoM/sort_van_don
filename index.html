@@ -61,6 +61,7 @@ details summary{cursor:pointer;color:var(--mute)}
     <span class="small">Cách chia file:</span>
     <label><input type="radio" name="mode" value="split" checked> Tách theo sàn (Shopee / TikTok riêng)</label>
     <label><input type="radio" name="mode" value="mix"> Gộp các sàn</label>
+    <label style="margin-left:12px"><input type="checkbox" id="splitKho"> Tách file theo Kho 1 / Kho 2 / Mix</label>
   </div>
   <div class="row" style="margin-top:10px">
     <button class="pri" id="btnRun" disabled>Chia nhóm</button>
@@ -299,7 +300,7 @@ function renderFiles() {
 function refreshRun() { $('btnRun').disabled = !(state.files.length && state.catalog); }
 
 /* ---------- classify ---------- */
-function classify(o, splitSet) {
+function classify(o, splitSet, splitKho) {
   // o.items: [{sku, qty}]
   if (o.problem) return { kho: '', group: CHECK, reason: o.problem };
   if (!o.items.length) return { kho: '', group: CHECK, reason: 'Không đọc được sản phẩm' };
@@ -314,11 +315,13 @@ function classify(o, splitSet) {
   list.forEach(function (s) { if (cat[s].kho === '1') c1++; else c2++; nhoms[cat[s].nhom] = true; });
   var kho = c2 >= c1 ? '2' : '1';
   var nl = Object.keys(nhoms), group;
-  if (nl.length === 1) {
+  // khi tách file theo kho: đơn có SKU ở cả 2 kho → luôn vào Mix của kho chiếm nhiều SKU hơn
+  if (splitKho && c1 > 0 && c2 > 0) group = 'Mix';
+  else if (nl.length === 1) {
     group = nl[0];
     if (splitSet[nl[0].toLowerCase()]) group += list.length === 1 ? ' – 1 SKU' : ' – từ 2 SKU';
   } else group = 'Mix';
-  return { kho: kho, group: group, reason: '' };
+  return { kho: kho, group: group, reason: '', khoSort: c1 && c2 ? '3' : kho };
 }
 
 /* ---------- run ---------- */
@@ -392,12 +395,7 @@ async function run() {
     var noPage = Object.keys(excelOrders).filter(function (k) { var o = excelOrders[k]; return k === o.sn && !inPdf[o.sn]; });
     if (noPage.length) warnings.push(noPage.length + ' đơn có trong Excel nhưng không có trang PDF: ' + noPage.slice(0, 8).join(', ') + (noPage.length > 8 ? '…' : ''));
 
-    var splitSet = {};
-    $('splitGroups').value.split(',').forEach(function (s) { s = s.trim().toLowerCase(); if (s) splitSet[s] = true; });
-    try { localStorage.setItem('vd_split', $('splitGroups').value); localStorage.setItem('vd_url', $('catUrl').value); } catch (e) {}
-
-    orders.forEach(function (o) { var c = classify(o, splitSet); o.kho = c.kho; o.group = c.group; o.reason = c.reason;
-      o.sig = o.items.map(function (x) { return x.sku; }).sort().join('+'); });
+    orders.forEach(function (o) { o.sig = o.items.map(function (x) { return x.sku; }).sort().join('+'); });
 
     var inPages = pdfs.reduce(function (a, p) { return a + p.pages.length; }, 0);
     if (dupOrders.length) warnings.push(dupOrders.length + ' đơn bị trùng giữa các file (chỉ in 1 lần): ' +
@@ -414,21 +412,29 @@ async function run() {
 
 function getMode() { var r = document.querySelector('input[name=mode]:checked'); return r ? r.value : 'split'; }
 async function buildOutput() {
-  var P = state.parsed, msg = $('runMsg'), mode = getMode();
-  try { localStorage.setItem('vd_mode', mode); } catch (e) {}
+  var P = state.parsed, msg = $('runMsg'), mode = getMode(), splitKho = $('splitKho').checked;
+  var splitSet = {};
+  $('splitGroups').value.split(',').forEach(function (s) { s = s.trim().toLowerCase(); if (s) splitSet[s] = true; });
+  try {
+    localStorage.setItem('vd_mode', mode); localStorage.setItem('vd_kho', splitKho ? '1' : '0');
+    localStorage.setItem('vd_split', $('splitGroups').value); localStorage.setItem('vd_url', $('catUrl').value);
+  } catch (e) {}
+  P.orders.forEach(function (o) { var c = classify(o, splitSet, splitKho);
+    o.kho = c.kho; o.group = c.group; o.reason = c.reason; o.khoSort = c.khoSort || '9'; });
   var groups = {};
   P.orders.forEach(function (o) {
-    var base = o.group === CHECK ? CHECK : 'Kho ' + o.kho + ' – ' + o.group;
+    var base = o.group === CHECK ? CHECK : (splitKho ? 'Kho ' + o.kho + ' – ' + o.group : o.group);
     var key = mode === 'split' ? o.platform + ' – ' + base : base;
     (groups[key] = groups[key] || { key: key, base: base, platform: mode === 'split' ? o.platform : '', kho: o.kho, group: o.group, orders: [] }).orders.push(o);
   });
   var gl = Object.keys(groups).map(function (k) { return groups[k]; });
   gl.sort(function (a, b) {
-    function rank(g) { return g.base === CHECK ? 9 : (g.kho === '1' ? 1 : 2) * 2 + (g.group === 'Mix' ? 1 : 0); }
+    function rank(g) { return g.base === CHECK ? 9 : (splitKho ? (g.kho === '1' ? 1 : 2) * 2 : 0) + (g.group === 'Mix' ? 1 : 0); }
     return a.platform.localeCompare(b.platform) || rank(a) - rank(b) || a.group.localeCompare(b.group, 'vi');
   });
+  // trong file: theo sàn → đơn kho 1, kho 2, đơn 2 kho → SKU
   gl.forEach(function (g) {
-    g.orders.sort(function (a, b) { return a.platform.localeCompare(b.platform) || a.sig.localeCompare(b.sig) || a.id.localeCompare(b.id); });
+    g.orders.sort(function (a, b) { return a.platform.localeCompare(b.platform) || a.khoSort.localeCompare(b.khoSort) || a.sig.localeCompare(b.sig) || a.id.localeCompare(b.id); });
   });
   for (var gi = 0; gi < gl.length; gi++) {
     var g = gl[gi];
@@ -571,7 +577,8 @@ try {
   var su = localStorage.getItem('vd_url'); if (su) $('catUrl').value = su;
   var sm = localStorage.getItem('vd_mode'); if (sm === 'mix' || sm === 'split') document.querySelector('input[name=mode][value=' + sm + ']').checked = true;
 } catch (e) {}
-Array.prototype.forEach.call(document.querySelectorAll('input[name=mode]'), function (el) {
+try { if (localStorage.getItem('vd_kho') === '1') $('splitKho').checked = true; } catch (e) {}
+Array.prototype.forEach.call(document.querySelectorAll('input[name=mode], #splitKho'), function (el) {
   el.onchange = async function () {
     if (!state.parsed) return;
     $('btnRun').disabled = true;
