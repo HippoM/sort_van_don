@@ -71,7 +71,8 @@ details summary{cursor:pointer;color:var(--mute)}
 <div class="card" id="outCard" hidden>
   <h2>3. Kết quả</h2>
   <div class="row" style="margin-bottom:10px">
-    <button class="pri" id="btnZip">Tải tất cả (.zip)</button>
+    <button class="pri" id="btnAll">Tải 1 file tổng (in 1 lần)</button>
+    <button id="btnZip">Tải từng file (.zip)</button>
     <button id="btnCsv">Tải bảng đối chiếu (.csv)</button>
   </div>
   <div id="checkBox" class="msg" style="margin:0 0 10px"></div>
@@ -625,6 +626,51 @@ $('btnZip').onclick = function () {
   download('van-don_' + stamp() + '.zip', makeZip(state.result.groups.map(function (g) { return { name: g.file, data: g.bytes }; })));
 };
 $('btnCsv').onclick = csvReport;
+$('btnAll').onclick = async function () {
+  var b = this; b.disabled = true; var old = b.textContent; b.textContent = 'Đang gộp…';
+  try {
+    var r = await buildMergedPdf(state.result.groups);
+    download('TONG_' + stamp() + '_' + r.orders + 'don.pdf', new Blob([r.bytes], { type: 'application/pdf' }));
+  } catch (e) { console.error(e); alertMsg('Lỗi gộp file: ' + (e.message || e)); }
+  b.disabled = false; b.textContent = old;
+};
+function alertMsg(t) { $('runMsg').innerHTML = '<span class="bad">' + esc(t) + '</span>'; }
+// File tổng: trang mục lục (nhóm, số đơn, trang từ–đến) + lần lượt từng nhóm (phiếu nhặt hàng + vận đơn)
+async function buildMergedPdf(groups) {
+  var out = await PDFLib.PDFDocument.create();
+  var font = await out.embedFont(PDFLib.StandardFonts.Helvetica);
+  var bold = await out.embedFont(PDFLib.StandardFonts.HelveticaBold);
+  var docs = [], i;
+  for (i = 0; i < groups.length; i++) docs.push(await PDFLib.PDFDocument.load(groups[i].bytes));
+  var W = 298, H = 420, perPage = 22, tocPages = Math.max(1, Math.ceil(groups.length / perPage));
+  var start = tocPages + 1, rows = [], totalOrders = 0, totalLabelPages = 0;
+  groups.forEach(function (g, k) {
+    var n = docs[k].getPageCount();
+    rows.push({ name: g.key, orders: g.orders.length, from: start, to: start + n - 1 });
+    start += n; totalOrders += g.orders.length;
+    g.orders.forEach(function (o) { totalLabelPages += o.pages.length; });
+  });
+  for (var p = 0; p < tocPages; p++) {
+    var pg = out.addPage([W, H]), y = H - 28;
+    pg.drawText('FILE TONG - MUC LUC' + (tocPages > 1 ? ' (' + (p + 1) + '/' + tocPages + ')' : ''), { x: 14, y: y, size: 12, font: bold }); y -= 15;
+    pg.drawText(groups.length + ' nhom  ' + totalOrders + ' don  ' + totalLabelPages + ' trang van don', { x: 14, y: y, size: 8.5, font: font }); y -= 8;
+    pg.drawLine({ start: { x: 14, y: y }, end: { x: W - 14, y: y }, thickness: 0.6 }); y -= 13;
+    pg.drawText('Nhom', { x: 14, y: y, size: 8, font: bold });
+    pg.drawText('Don', { x: W - 90, y: y, size: 8, font: bold });
+    pg.drawText('Trang', { x: W - 58, y: y, size: 8, font: bold }); y -= 12;
+    rows.slice(p * perPage, (p + 1) * perPage).forEach(function (r) {
+      pg.drawText(ascii(r.name).slice(0, 34), { x: 14, y: y, size: 8.5, font: font });
+      pg.drawText(String(r.orders), { x: W - 90, y: y, size: 8.5, font: bold });
+      pg.drawText(r.from + '-' + r.to, { x: W - 58, y: y, size: 8.5, font: font });
+      y -= 14;
+    });
+  }
+  for (i = 0; i < docs.length; i++) {
+    var copied = await out.copyPages(docs[i], docs[i].getPageIndices());
+    copied.forEach(function (cp) { out.addPage(cp); });
+  }
+  return { bytes: await out.save(), orders: totalOrders };
+}
 renderFiles();
 fetchCatalog();
 window.__vd = { state: state, addFiles: addFiles, run: run, loadCatalogText: loadCatalogText };
