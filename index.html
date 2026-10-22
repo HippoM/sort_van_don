@@ -72,6 +72,7 @@ details summary{cursor:pointer;color:var(--mute)}
   <h2>3. Kết quả</h2>
   <div class="row" style="margin-bottom:10px">
     <button class="pri" id="btnAll">Tải 1 file tổng (in 1 lần)</button>
+    <button id="btnSel" disabled>Gộp file đã chọn</button>
     <button id="btnZip">Tải từng file (.zip)</button>
     <button id="btnCsv">Tải bảng đối chiếu (.csv)</button>
   </div>
@@ -560,12 +561,15 @@ function makeZip(files) {
 function stamp() { var d = new Date(); return d.getFullYear() + String(d.getMonth() + 1).padStart(2, '0') + String(d.getDate()).padStart(2, '0') + '-' + String(d.getHours()).padStart(2, '0') + String(d.getMinutes()).padStart(2, '0'); }
 function renderResult() {
   var r = state.result;
-  $('grpTable').innerHTML = '<tr><th>File</th><th>Nhóm</th><th class="n">Đơn</th><th class="n">Trang</th><th></th></tr>' +
+  $('grpTable').innerHTML = '<tr><th>File</th><th>Nhóm</th><th class="n">Đơn</th><th class="n">Trang</th><th></th>' +
+    '<th title="Chọn tất cả"><input type="checkbox" id="selAll"></th></tr>' +
     r.groups.map(function (g, i) {
       var pages = g.orders.reduce(function (a, o) { return a + o.pages.length; }, 0);
       return '<tr><td class="small">' + esc(g.file) + '</td><td' + (g.key === CHECK ? ' class="bad"' : '') + '>' + esc(g.key) + '</td><td class="n">' + g.orders.length +
-        '</td><td class="n">' + pages + '</td><td><button data-g="' + i + '">Tải PDF</button></td></tr>';
+        '</td><td class="n">' + pages + '</td><td><button data-g="' + i + '">Tải PDF</button></td>' +
+        '<td><input type="checkbox" data-sel="' + i + '"></td></tr>';
     }).join('');
+  updateSel();
   $('srcTable').innerHTML = '<tr><th>File</th><th>Loại</th><th>Shop</th><th class="n">Đơn</th><th class="n">Trang</th></tr>' +
     r.sources.map(function (s) {
       var shops = {};
@@ -626,14 +630,31 @@ $('btnZip').onclick = function () {
   download('van-don_' + stamp() + '.zip', makeZip(state.result.groups.map(function (g) { return { name: g.file, data: g.bytes }; })));
 };
 $('btnCsv').onclick = csvReport;
-$('btnAll').onclick = async function () {
-  var b = this; b.disabled = true; var old = b.textContent; b.textContent = 'Đang gộp…';
+async function mergeAndDownload(b, groups, prefix) {
+  b.disabled = true; var old = b.textContent; b.textContent = 'Đang gộp…';
   try {
-    var r = await buildMergedPdf(state.result.groups);
-    download('TONG_' + stamp() + '_' + r.orders + 'don.pdf', new Blob([r.bytes], { type: 'application/pdf' }));
+    var r = await buildMergedPdf(groups);
+    download(prefix + stamp() + '_' + r.orders + 'don.pdf', new Blob([r.bytes], { type: 'application/pdf' }));
   } catch (e) { console.error(e); alertMsg('Lỗi gộp file: ' + (e.message || e)); }
-  b.disabled = false; b.textContent = old;
-};
+  b.textContent = old; b.disabled = false; updateSel();
+}
+$('btnAll').onclick = function () { mergeAndDownload(this, state.result.groups, 'TONG_'); };
+function selectedGroups() {
+  return Array.prototype.filter.call(document.querySelectorAll('#grpTable input[data-sel]'), function (c) { return c.checked; })
+    .map(function (c) { return state.result.groups[+c.dataset.sel]; });
+}
+function updateSel() {
+  var sel = selectedGroups(), all = document.querySelectorAll('#grpTable input[data-sel]');
+  var n = sel.reduce(function (a, g) { return a + g.orders.length; }, 0);
+  $('btnSel').disabled = !sel.length;
+  $('btnSel').textContent = sel.length ? 'Gộp ' + sel.length + ' file đã chọn (' + n + ' đơn)' : 'Gộp file đã chọn';
+  var sa = $('selAll'); if (sa) sa.checked = all.length > 0 && sel.length === all.length;
+}
+$('grpTable').addEventListener('change', function (e) {
+  if (e.target.id === 'selAll') Array.prototype.forEach.call(document.querySelectorAll('#grpTable input[data-sel]'), function (c) { c.checked = e.target.checked; });
+  updateSel();
+});
+$('btnSel').onclick = function () { var s = selectedGroups(); if (s.length) mergeAndDownload(this, s, 'CHON_'); };
 function alertMsg(t) { $('runMsg').innerHTML = '<span class="bad">' + esc(t) + '</span>'; }
 // File tổng: trang mục lục (nhóm, số đơn, trang từ–đến) + lần lượt từng nhóm (phiếu nhặt hàng + vận đơn)
 async function buildMergedPdf(groups) {
