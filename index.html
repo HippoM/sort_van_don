@@ -27,6 +27,7 @@ td.n{text-align:right;font-variant-numeric:tabular-nums}
 .tag{display:inline-block;padding:1px 7px;border-radius:9px;font-size:12px;background:#eee}
 .ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}
 .msg{font-size:13px;margin-top:8px}
+tr.done td{background:#e8f5ec}
 .small{font-size:12px;color:var(--mute)}
 details summary{cursor:pointer;color:var(--mute)}
 .scroll{max-height:360px;overflow:auto}
@@ -76,7 +77,8 @@ details summary{cursor:pointer;color:var(--mute)}
     <button id="btnZip">Tải từng file (.zip)</button>
     <button id="btnCsv">Tải bảng đối chiếu (.csv)</button>
   </div>
-  <div id="checkBox" class="msg" style="margin:0 0 10px"></div>
+  <div id="checkBox" class="msg" style="margin:0 0 6px"></div>
+  <div id="doneBox" class="msg" style="margin:0 0 10px"></div>
   <table id="grpTable"></table>
   <h2 style="margin-top:18px">Số đơn theo file / shop</h2>
   <table id="srcTable"></table>
@@ -559,17 +561,36 @@ function makeZip(files) {
 
 /* ---------- render ---------- */
 function stamp() { var d = new Date(); return d.getFullYear() + String(d.getMonth() + 1).padStart(2, '0') + String(d.getDate()).padStart(2, '0') + '-' + String(d.getHours()).padStart(2, '0') + String(d.getMinutes()).padStart(2, '0'); }
-function renderResult() {
+function hhmm(d) { return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0'); }
+// Đánh dấu nhóm đã tải về (để in); bỏ tick các ô đã chọn
+function markDone(groups) {
+  var now = new Date();
+  groups.forEach(function (g) { g.doneAt = now; });
+  renderGroups();
+}
+function renderGroups() {
   var r = state.result;
-  $('grpTable').innerHTML = '<tr><th>File</th><th>Nhóm</th><th class="n">Đơn</th><th class="n">Trang</th><th></th>' +
+  $('grpTable').innerHTML = '<tr><th>File</th><th>Nhóm</th><th class="n">Đơn</th><th class="n">Trang</th><th>Trạng thái</th><th></th>' +
     '<th title="Chọn tất cả"><input type="checkbox" id="selAll"></th></tr>' +
     r.groups.map(function (g, i) {
       var pages = g.orders.reduce(function (a, o) { return a + o.pages.length; }, 0);
-      return '<tr><td class="small">' + esc(g.file) + '</td><td' + (g.key === CHECK ? ' class="bad"' : '') + '>' + esc(g.key) + '</td><td class="n">' + g.orders.length +
-        '</td><td class="n">' + pages + '</td><td><button data-g="' + i + '">Tải PDF</button></td>' +
+      var st = g.doneAt ? '<span class="ok">✓ Đã tải ' + hhmm(g.doneAt) + '</span>' : '<span class="small">Chưa tải</span>';
+      return '<tr' + (g.doneAt ? ' class="done"' : '') + '><td class="small">' + esc(g.file) + '</td><td' + (g.key === CHECK ? ' class="bad"' : '') + '>' + esc(g.key) + '</td><td class="n">' + g.orders.length +
+        '</td><td class="n">' + pages + '</td><td>' + st + '</td><td><button data-g="' + i + '">Tải PDF</button></td>' +
         '<td><input type="checkbox" data-sel="' + i + '"></td></tr>';
     }).join('');
+  var done = r.groups.filter(function (g) { return g.doneAt; });
+  var nDone = done.reduce(function (a, g) { return a + g.orders.length; }, 0);
+  var nAll = r.groups.reduce(function (a, g) { return a + g.orders.length; }, 0);
+  var left = r.groups.length - done.length;
+  $('doneBox').innerHTML = left === 0
+    ? '<b class="ok">✓ Đã tải đủ ' + r.groups.length + '/' + r.groups.length + ' file · ' + nAll + ' đơn</b>'
+    : '<b class="warn">Đã tải ' + done.length + '/' + r.groups.length + ' file · ' + nDone + '/' + nAll + ' đơn — còn ' + left + ' file chưa tải</b>';
   updateSel();
+}
+function renderResult() {
+  var r = state.result;
+  renderGroups();
   $('srcTable').innerHTML = '<tr><th>File</th><th>Loại</th><th>Shop</th><th class="n">Đơn</th><th class="n">Trang</th></tr>' +
     r.sources.map(function (s) {
       var shops = {};
@@ -625,9 +646,10 @@ drop.ondrop = function (e) { e.preventDefault(); drop.classList.remove('over'); 
 $('btnClear').onclick = function () { state.files = []; state.parsed = null; state.result = null; renderFiles(); refreshRun(); $('outCard').hidden = true; $('runMsg').innerHTML = ''; };
 $('btnRun').onclick = run;
 $('grpTable').onclick = function (e) { var b = e.target.closest('button[data-g]'); if (!b) return;
-  var g = state.result.groups[+b.dataset.g]; download(g.file, new Blob([g.bytes], { type: 'application/pdf' })); };
+  var g = state.result.groups[+b.dataset.g]; download(g.file, new Blob([g.bytes], { type: 'application/pdf' })); markDone([g]); };
 $('btnZip').onclick = function () {
   download('van-don_' + stamp() + '.zip', makeZip(state.result.groups.map(function (g) { return { name: g.file, data: g.bytes }; })));
+  markDone(state.result.groups);
 };
 $('btnCsv').onclick = csvReport;
 async function mergeAndDownload(b, groups, prefix) {
@@ -635,8 +657,9 @@ async function mergeAndDownload(b, groups, prefix) {
   try {
     var r = await buildMergedPdf(groups);
     download(prefix + stamp() + '_' + r.orders + 'don.pdf', new Blob([r.bytes], { type: 'application/pdf' }));
-  } catch (e) { console.error(e); alertMsg('Lỗi gộp file: ' + (e.message || e)); }
-  b.textContent = old; b.disabled = false; updateSel();
+    b.textContent = old; markDone(groups);
+  } catch (e) { console.error(e); alertMsg('Lỗi gộp file: ' + (e.message || e)); b.textContent = old; }
+  b.disabled = false; updateSel();
 }
 $('btnAll').onclick = function () { mergeAndDownload(this, state.result.groups, 'TONG_'); };
 function selectedGroups() {
